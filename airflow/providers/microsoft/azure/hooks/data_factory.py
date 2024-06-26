@@ -53,6 +53,8 @@ from airflow.providers.microsoft.azure.utils import (
     add_managed_identity_connection_widgets,
     get_async_default_azure_credential,
     get_sync_default_azure_credential,
+    AzureCloud,
+    AzureEndpoint
 )
 
 if TYPE_CHECKING:
@@ -156,6 +158,7 @@ class AzureDataFactoryHook(BaseHook):
     conn_name_attr: str = "azure_data_factory_conn_id"
     default_conn_name: str = "azure_data_factory_default"
     hook_name: str = "Azure Data Factory"
+    azure_cloud: AzureCloud = AzureCloud.AzureGlobal
 
     @classmethod
     @add_managed_identity_connection_widgets
@@ -172,6 +175,11 @@ class AzureDataFactoryHook(BaseHook):
                 lazy_gettext("Resource Group Name"), widget=BS3TextFieldWidget()
             ),
             "factory_name": StringField(lazy_gettext("Factory Name"), widget=BS3TextFieldWidget()),
+            "cloudOperator": StringField(
+                lazy_gettext("Cloud Portal URL"),
+                widget=BS3TextFieldWidget(),
+                description="Choose one of your cloud: AzureGlobal, AzureChina, AzureUS",
+            ),
         }
 
     @classmethod
@@ -189,6 +197,21 @@ class AzureDataFactoryHook(BaseHook):
         self._conn: DataFactoryManagementClient | None = None
         self.conn_id = azure_data_factory_conn_id
         super().__init__()
+
+        def get_cloud():
+            conn = self.get_connection(self.conn_id)
+            extras = conn.extra_dejson
+
+            try:
+                operator = get_field(extras, "cloudOperator", strict=True)
+                if operator == "AzureChina":
+                    self.azure_cloud = AzureCloud.AzureChinaCloud
+                elif operator == "AzureUS":
+                    self.azure_cloud = AzureCloud.AzureUSGovernment
+            except KeyError:
+                pass
+
+        get_cloud()
 
     def get_conn(self) -> DataFactoryManagementClient:
         if self._conn is not None:
@@ -209,7 +232,8 @@ class AzureDataFactoryHook(BaseHook):
                 raise ValueError("A Tenant ID is required when authenticating with Client ID and Secret.")
 
             credential = ClientSecretCredential(
-                client_id=conn.login, client_secret=conn.password, tenant_id=tenant
+                client_id=conn.login, client_secret=conn.password, tenant_id=tenant,
+                authority=AzureEndpoint.get_login_endpoint(self.azure_cloud, False)
             )
         else:
             managed_identity_client_id = get_field(extras, "managed_identity_client_id")
@@ -218,7 +242,12 @@ class AzureDataFactoryHook(BaseHook):
                 managed_identity_client_id=managed_identity_client_id,
                 workload_identity_tenant_id=workload_identity_tenant_id,
             )
-        self._conn = self._create_client(credential, subscription_id)
+        self._conn = self._create_client(
+            credential,
+            subscription_id,
+            base_url=AzureEndpoint.get_management_endpoint(self.azure_cloud),
+            credential_scopes=[f"{AzureEndpoint.get_management_endpoint(self.azure_cloud)}/.default"]
+        )
 
         return self._conn
 
@@ -247,10 +276,17 @@ class AzureDataFactoryHook(BaseHook):
         return factory_name in factories
 
     @staticmethod
-    def _create_client(credential: Credentials, subscription_id: str):
+    def _create_client(
+            credential: Credentials,
+            subscription_id: str,
+            base_url: str,
+            **kwargs: Any
+    ) -> DataFactoryManagementClient:
         return DataFactoryManagementClient(
             credential=credential,
             subscription_id=subscription_id,
+            base_url=base_url,
+            **kwargs
         )
 
     @provide_targeted_factory
@@ -1149,7 +1185,10 @@ class AzureDataFactoryAsyncHook(AzureDataFactoryHook):
                 raise ValueError("A Tenant ID is required when authenticating with Client ID and Secret.")
 
             credential = AsyncClientSecretCredential(
-                client_id=conn.login, client_secret=conn.password, tenant_id=tenant
+                client_id=conn.login,
+                client_secret=conn.password,
+                tenant_id=tenant,
+                authority=AzureEndpoint.get_login_endpoint(self.azure_cloud, False)
             )
         else:
             managed_identity_client_id = get_field(extras, "managed_identity_client_id")
@@ -1162,6 +1201,8 @@ class AzureDataFactoryAsyncHook(AzureDataFactoryHook):
         self._async_conn = AsyncDataFactoryManagementClient(
             credential=credential,
             subscription_id=subscription_id,
+            base_url=AzureEndpoint.get_management_endpoint(self.azure_cloud),
+            credential_scopes=[f"{AzureEndpoint.get_management_endpoint(self.azure_cloud)}/.default"]
         )
 
         return self._async_conn
